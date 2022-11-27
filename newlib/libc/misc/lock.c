@@ -87,9 +87,12 @@ subroutines are required for linking multi-threaded applications.
 #ifndef __SINGLE_THREAD__
 
 #include <sys/lock.h>
+#include <stdlib.h>
 
 struct __lock {
-  char unused;
+	int num_taken;
+	int is_taken;
+	int thread;  // actually stores thread+1, as 0 is reserved for empty
 };
 
 struct __lock __lock___sinit_recursive_mutex;
@@ -105,53 +108,87 @@ struct __lock __lock___arc4random_mutex;
 void
 __retarget_lock_init (_LOCK_T *lock)
 {
+  	__retarget_lock_init_recursive(lock);
 }
 
 void
 __retarget_lock_init_recursive(_LOCK_T *lock)
 {
+	*lock = (_LOCK_T) calloc(1, sizeof(struct __lock));
 }
 
 void
 __retarget_lock_close(_LOCK_T lock)
 {
+  	__retarget_lock_close_recursive(lock);
 }
 
 void
 __retarget_lock_close_recursive(_LOCK_T lock)
 {
+  	free(lock);
 }
 
 void
 __retarget_lock_acquire (_LOCK_T lock)
 {
+	__retarget_lock_acquire_recursive(lock);
 }
 
 void
 __retarget_lock_acquire_recursive (_LOCK_T lock)
 {
+	int tid;
+  	asm("csrr %0, mhartid" : "=r"(tid));
+	tid += 1;
+	if (__atomic_load_n(&lock->thread, __ATOMIC_RELAXED) != tid) {{
+		int val = 1;
+		while (val != 0) {{
+			__atomic_exchange(&lock->is_taken, &val, &val, __ATOMIC_ACQUIRE);
+		}}
+		__atomic_store_n(&lock->thread, tid, __ATOMIC_RELAXED);
+	}}
+	lock->num_taken++;
 }
 
 int
 __retarget_lock_try_acquire(_LOCK_T lock)
 {
-  return 1;
+	return __retarget_lock_try_acquire_recursive(lock);
 }
 
 int
 __retarget_lock_try_acquire_recursive(_LOCK_T lock)
 {
-  return 1;
+	int tid;
+  	asm("csrr %0, mhartid" : "=r"(tid));
+	tid += 1;
+	if (__atomic_load_n(&lock->thread, __ATOMIC_RELAXED) != tid) {{
+		int val = 1;
+		__atomic_exchange(&lock->is_taken, &val, &val, __ATOMIC_ACQUIRE);
+		if (val != 0) {
+			return 0;
+		}
+		__atomic_store_n(&lock->thread, tid, __ATOMIC_RELAXED);
+	}}
+	lock->num_taken++;
+	return 1;
 }
 
 void
 __retarget_lock_release (_LOCK_T lock)
 {
+  __retarget_lock_release_recursive(lock);
 }
 
 void
 __retarget_lock_release_recursive (_LOCK_T lock)
 {
+	lock->num_taken--;
+	if (lock->num_taken == 0) {
+		__atomic_store_n(&lock->thread, 0, __ATOMIC_RELAXED);
+		__atomic_store_n(&lock->is_taken, 0, __ATOMIC_RELEASE);
+	}
 }
 
 #endif /* !defined(__SINGLE_THREAD__) */
